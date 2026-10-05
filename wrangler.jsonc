@@ -1,0 +1,11 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "waai-publishing-hub",
+  "compatibility_date": "2026-10-05",
+  "kv_namespaces": [
+    {
+      "binding": "WAAI_DATA",
+      "id": "0f72f7140af74d66a54ae2bcfd7dd9f6"
+    }
+  ]
+}
