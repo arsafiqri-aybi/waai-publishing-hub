@@ -10,7 +10,7 @@ async function handle(request) {
     return htmlResponse(DASHBOARD_HTML);
   }
   if (request.method === 'GET' && path === '/api/health') {
-    return json({ ok: true, service: 'waai-publishing-hub', version: '1.0.0' });
+    return json({ ok: true, service: 'waai-publishing-hub', version: '1.1.0' });
   }
   if (request.method === 'GET' && path === '/api/posts') {
     return listPosts();
@@ -22,6 +22,14 @@ async function handle(request) {
   if (request.method === 'POST' && path === '/api/upload') {
     if (!(await isAdmin(request))) return json({ error: 'Unauthorized' }, 401);
     return uploadPost(request);
+  }
+  if (request.method === 'POST' && path === '/api/media') {
+    if (!(await isAdmin(request))) return json({ error: 'Unauthorized' }, 401);
+    return uploadMediaRaw(request);
+  }
+  if (request.method === 'POST' && path === '/api/posts') {
+    if (!(await isAdmin(request))) return json({ error: 'Unauthorized' }, 401);
+    return createPostRecord(request);
   }
   const metricsMatch = path.match(/^\/api\/posts\/([^/]+)\/metrics$/);
   if (request.method === 'POST' && metricsMatch) {
@@ -102,6 +110,48 @@ async function uploadPost(request) {
   await WAAI_DATA.put('post:' + createdAt + ':' + id, JSON.stringify(post));
   await WAAI_DATA.put('post-id:' + id, 'post:' + createdAt + ':' + id);
   return json({ ok: true, post }, 201);
+}
+
+async function uploadMediaRaw(request) {
+  const type = request.headers.get('content-type') || '';
+  if (type && !type.toLowerCase().startsWith('video/mp4') && type !== 'application/octet-stream') return json({ error: 'Only MP4 is accepted' }, 415);
+  const declared = Number(request.headers.get('content-length') || 0);
+  if (declared && declared > MAX_FILE_BYTES) return json({ error: 'File exceeds 25 MiB limit' }, 413);
+  let bytes;
+  try { bytes = await request.arrayBuffer(); } catch { return json({ error: 'Could not read upload body' }, 400); }
+  if (!bytes.byteLength) return json({ error: 'Empty upload' }, 400);
+  if (bytes.byteLength > MAX_FILE_BYTES) return json({ error: 'File exceeds 25 MiB limit' }, 413);
+  const id = crypto.randomUUID();
+  const createdAt = new Date().toISOString();
+  const filename = clean(decodeURIComponent(request.headers.get('x-filename') || 'video.mp4'));
+  await WAAI_DATA.put('media:' + id, bytes);
+  await WAAI_DATA.put('media-meta:' + id, JSON.stringify({ content_type:'video/mp4', filename, size_bytes:bytes.byteLength, created_at:createdAt }));
+  const origin = new URL(request.url).origin;
+  return json({ ok:true, media:{ id, media_url:origin + '/media/' + id + '.mp4', filename, size_bytes:bytes.byteLength, created_at:createdAt } }, 201);
+}
+
+async function createPostRecord(request) {
+  let body;
+  try { body = await request.json(); } catch { return json({ error:'Invalid JSON' }, 400); }
+  const mediaId = str(body.media_id);
+  if (!mediaId) return json({ error:'media_id is required' }, 400);
+  const metaRaw = await WAAI_DATA.get('media-meta:' + mediaId);
+  if (!metaRaw) return json({ error:'Uploaded media not found' }, 404);
+  const meta = JSON.parse(metaRaw);
+  const createdAt = new Date().toISOString();
+  const origin = new URL(request.url).origin;
+  const post = {
+    id:mediaId, title:str(body.title)||'Untitled Reel', caption:str(body.caption),
+    platform:str(body.platform)||'Instagram', status:str(body.status)||'ready',
+    created_at:createdAt, published_at:str(body.published_at), permalink:str(body.permalink),
+    media_url:origin + '/media/' + mediaId + '.mp4', filename:meta.filename||'video.mp4',
+    size_bytes:meta.size_bytes||0,
+    metrics:{ views:0, reach:0, likes:0, saves:0, shares:0, comments:0 }
+  };
+  const postKey='post:' + createdAt + ':' + mediaId;
+  await WAAI_DATA.put(postKey, JSON.stringify(post));
+  await WAAI_DATA.put('post-id:' + mediaId, postKey);
+  return json({ ok:true, post }, 201);
 }
 
 async function listPosts() {
@@ -219,7 +269,7 @@ const DASHBOARD_HTML = `<!doctype html>
 <meta name="viewport" content="width=device-width,initial-scale=1" />
 <title>WAAI Publishing Hub</title>
 <style>
-:root{--bg:#f4f0e9;--ink:#171717;--muted:#726c65;--card:#fffdf9;--line:#ddd5ca;--rose:#b77878;--rose2:#eadada;--ok:#2f6e4f;--shadow:0 16px 50px rgba(36,25,16,.08)}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.shell{width:min(1180px,calc(100% - 32px));margin:auto;padding:28px 0 70px}.top{display:flex;align-items:flex-end;justify-content:space-between;gap:20px;padding:18px 0 34px;border-bottom:1px solid var(--line)}.eyebrow{font-size:12px;letter-spacing:.18em;text-transform:uppercase;color:var(--muted)}h1{font-family:Georgia,"Times New Roman",serif;font-weight:500;font-size:clamp(36px,6vw,68px);line-height:.95;margin:8px 0 0;letter-spacing:-.04em}.tagline{max-width:350px;text-align:right;color:var(--muted);line-height:1.5;font-size:14px}.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin:22px 0}.stat,.panel,.post{background:rgba(255,253,249,.78);border:1px solid var(--line);border-radius:22px;box-shadow:var(--shadow)}.stat{padding:20px}.stat b{display:block;font-family:Georgia,serif;font-size:34px;font-weight:500}.stat span{font-size:12px;color:var(--muted)}.layout{display:grid;grid-template-columns:360px 1fr;gap:18px;align-items:start}.panel{padding:20px;position:sticky;top:18px}.panel h2,.library h2{font-size:16px;margin:0 0 6px}.sub{font-size:13px;color:var(--muted);line-height:1.5;margin-bottom:18px}label{display:block;font-size:12px;color:var(--muted);margin:12px 0 6px}input,textarea,select{width:100%;border:1px solid var(--line);background:#fffefa;border-radius:13px;padding:11px 12px;color:var(--ink);font:inherit;outline:none}textarea{min-height:115px;resize:vertical}input:focus,textarea:focus,select:focus{border-color:#bfa6a0;box-shadow:0 0 0 3px rgba(183,120,120,.12)}.filebox{padding:14px;border:1px dashed #c8bbb0;border-radius:14px;background:#faf6f0}.btn{border:0;border-radius:999px;padding:11px 16px;background:var(--ink);color:white;font-weight:650;cursor:pointer}.btn.secondary{background:#fffefa;color:var(--ink);border:1px solid var(--line)}.btn:disabled{opacity:.5;cursor:not-allowed}.row{display:flex;gap:8px;align-items:center}.row>*{flex:1}.statusline{font-size:12px;min-height:18px;margin-top:10px;color:var(--muted)}.library{min-width:0}.libhead{display:flex;justify-content:space-between;align-items:center;gap:12px;margin:2px 0 14px}.search{max-width:290px}.posts{display:grid;gap:12px}.post{padding:18px;display:grid;grid-template-columns:1fr auto;gap:18px}.post h3{font-family:Georgia,serif;font-size:23px;font-weight:500;margin:0 0 7px}.meta{display:flex;gap:8px;flex-wrap:wrap;color:var(--muted);font-size:12px}.pill{padding:4px 8px;border-radius:999px;background:var(--rose2);color:#744e4e;font-size:11px}.caption{white-space:pre-wrap;color:#4d4944;line-height:1.55;font-size:13px;margin-top:13px;max-height:86px;overflow:hidden}.metrics{display:grid;grid-template-columns:repeat(3,minmax(54px,1fr));gap:6px;min-width:210px}.metric{padding:9px;border-radius:12px;background:#f7f2eb;border:1px solid #ebe2d8}.metric b{display:block;font-size:15px}.metric span{font-size:10px;color:var(--muted)}.actions{display:flex;gap:7px;flex-wrap:wrap;margin-top:13px}.tiny{font-size:11px;padding:7px 10px}.empty{padding:45px 18px;text-align:center;border:1px dashed var(--line);border-radius:20px;color:var(--muted)}.locknote{font-size:11px;color:var(--muted);margin-top:8px}.dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--ok);margin-right:6px}.footer{margin-top:38px;padding-top:18px;border-top:1px solid var(--line);display:flex;justify-content:space-between;color:var(--muted);font-size:11px}@media(max-width:820px){.top{align-items:flex-start;flex-direction:column}.tagline{text-align:left}.layout{grid-template-columns:1fr}.panel{position:static}.stats{grid-template-columns:1fr}.post{grid-template-columns:1fr}.metrics{min-width:0}.libhead{align-items:flex-start;flex-direction:column}.search{max-width:none;width:100%}}
+:root{--bg:#f4f0e9;--ink:#171717;--muted:#726c65;--card:#fffdf9;--line:#ddd5ca;--rose:#b77878;--rose2:#eadada;--ok:#2f6e4f;--shadow:0 16px 50px rgba(36,25,16,.08)}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.shell{width:min(1180px,calc(100% - 32px));margin:auto;padding:28px 0 70px}.top{display:flex;align-items:flex-end;justify-content:space-between;gap:20px;padding:18px 0 34px;border-bottom:1px solid var(--line)}.eyebrow{font-size:12px;letter-spacing:.18em;text-transform:uppercase;color:var(--muted)}h1{font-family:Georgia,"Times New Roman",serif;font-weight:500;font-size:clamp(36px,6vw,68px);line-height:.95;margin:8px 0 0;letter-spacing:-.04em}.tagline{max-width:350px;text-align:right;color:var(--muted);line-height:1.5;font-size:14px}.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin:22px 0}.stat,.panel,.post{background:rgba(255,253,249,.78);border:1px solid var(--line);border-radius:22px;box-shadow:var(--shadow)}.stat{padding:20px}.stat b{display:block;font-family:Georgia,serif;font-size:34px;font-weight:500}.stat span{font-size:12px;color:var(--muted)}.layout{display:grid;grid-template-columns:360px 1fr;gap:18px;align-items:start}.panel{padding:20px;position:sticky;top:18px}.panel h2,.library h2{font-size:16px;margin:0 0 6px}.sub{font-size:13px;color:var(--muted);line-height:1.5;margin-bottom:18px}label{display:block;font-size:12px;color:var(--muted);margin:12px 0 6px}input,textarea,select{width:100%;border:1px solid var(--line);background:#fffefa;border-radius:13px;padding:11px 12px;color:var(--ink);font:inherit;outline:none}textarea{min-height:115px;resize:vertical}input:focus,textarea:focus,select:focus{border-color:#bfa6a0;box-shadow:0 0 0 3px rgba(183,120,120,.12)}.filebox{padding:14px;border:1px dashed #c8bbb0;border-radius:14px;background:#faf6f0}.btn{border:0;border-radius:999px;padding:11px 16px;background:var(--ink);color:white;font-weight:650;cursor:pointer}.btn.secondary{background:#fffefa;color:var(--ink);border:1px solid var(--line)}.btn:disabled{opacity:.5;cursor:not-allowed}.row{display:flex;gap:8px;align-items:center}.row>*{flex:1}.statusline{font-size:12px;min-height:18px;margin-top:10px;color:var(--muted)}.uploadbox{margin-top:12px;padding:13px;border:1px solid var(--line);border-radius:14px;background:#faf7f2;display:none}.uploadbox.active{display:block}.progress{height:8px;border-radius:999px;background:#e9e0d6;overflow:hidden;margin:8px 0}.progress>i{display:block;height:100%;width:0;background:var(--ink);transition:width .15s linear}.uploadmsg{font-size:12px;line-height:1.45}.uploadmsg.ok{color:var(--ok)}.uploadmsg.err{color:#9b3d3d;font-weight:600}.library{min-width:0}.libhead{display:flex;justify-content:space-between;align-items:center;gap:12px;margin:2px 0 14px}.search{max-width:290px}.posts{display:grid;gap:12px}.post{padding:18px;display:grid;grid-template-columns:1fr auto;gap:18px}.post h3{font-family:Georgia,serif;font-size:23px;font-weight:500;margin:0 0 7px}.meta{display:flex;gap:8px;flex-wrap:wrap;color:var(--muted);font-size:12px}.pill{padding:4px 8px;border-radius:999px;background:var(--rose2);color:#744e4e;font-size:11px}.caption{white-space:pre-wrap;color:#4d4944;line-height:1.55;font-size:13px;margin-top:13px;max-height:86px;overflow:hidden}.metrics{display:grid;grid-template-columns:repeat(3,minmax(54px,1fr));gap:6px;min-width:210px}.metric{padding:9px;border-radius:12px;background:#f7f2eb;border:1px solid #ebe2d8}.metric b{display:block;font-size:15px}.metric span{font-size:10px;color:var(--muted)}.actions{display:flex;gap:7px;flex-wrap:wrap;margin-top:13px}.tiny{font-size:11px;padding:7px 10px}.empty{padding:45px 18px;text-align:center;border:1px dashed var(--line);border-radius:20px;color:var(--muted)}.locknote{font-size:11px;color:var(--muted);margin-top:8px}.dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--ok);margin-right:6px}.footer{margin-top:38px;padding-top:18px;border-top:1px solid var(--line);display:flex;justify-content:space-between;color:var(--muted);font-size:11px}@media(max-width:820px){.top{align-items:flex-start;flex-direction:column}.tagline{text-align:left}.layout{grid-template-columns:1fr}.panel{position:static}.stats{grid-template-columns:1fr}.post{grid-template-columns:1fr}.metrics{min-width:0}.libhead{align-items:flex-start;flex-direction:column}.search{max-width:none;width:100%}}
 </style>
 </head>
 <body>
@@ -238,12 +288,14 @@ const DASHBOARD_HTML = `<!doctype html>
         <label>Published at (optional)</label><input name="published_at" type="datetime-local" />
         <label>MP4</label><div class="filebox"><input name="file" type="file" accept="video/mp4" required /></div>
         <div style="height:14px"></div><button class="btn" id="uploadBtn" type="submit">Upload to Cloudflare</button>
-        <div id="uploadStatus" class="statusline"></div><div class="locknote">Admin key disimpan hanya di browser ini (localStorage), bukan di halaman publik.</div>
+        <div id="uploadStatus" class="statusline"></div>
+        <div id="uploadBox" class="uploadbox"><div id="uploadMsg" class="uploadmsg">Menyiapkan upload…</div><div class="progress"><i id="uploadBar"></i></div><div id="uploadPct" class="uploadmsg">0%</div></div>
+        <div class="locknote">Admin key disimpan hanya di browser ini (localStorage), bukan di halaman publik.</div>
       </form>
     </aside>
     <section class="library"><div class="libhead"><div><h2>Content library</h2><div class="sub" style="margin:4px 0 0">Riwayat media, posting, dan metrics yang kita simpan.</div></div><input class="search" id="search" placeholder="Search title / caption..." /></div><div id="posts" class="posts"></div></section>
   </main>
-  <footer class="footer"><span><span class="dot"></span>Cloudflare Worker online</span><span>WAAI Publishing Hub · v1.0</span></footer>
+  <footer class="footer"><span><span class="dot"></span>Cloudflare Worker online</span><span>WAAI Publishing Hub · v1.1</span></footer>
 </div>
 <script>
 const $ = s => document.querySelector(s); let allPosts = [];
@@ -261,7 +313,5 @@ function render(posts){
 function metric(label,n){return '<div class="metric"><b>'+fmt(n)+'</b><span>'+label+'</span></div>'}
 window.copyText=async t=>{await navigator.clipboard.writeText(t)};
 $('#search').addEventListener('input',e=>{const q=e.target.value.toLowerCase();render(allPosts.filter(p=>(p.title+' '+p.caption).toLowerCase().includes(q)))});
-$('#uploadForm').addEventListener('submit',async e=>{e.preventDefault(); const btn=$('#uploadBtn'),status=$('#uploadStatus'),key=$('#adminKey').value.trim(); if(!key){status.textContent='Admin key diperlukan.';return} localStorage.setItem('waai_admin_key',key); const fd=new FormData(e.currentTarget); const published=fd.get('published_at'); if(published) fd.set('published_at',new Date(published).toISOString()); btn.disabled=true;status.textContent='Uploading…'; try{const r=await fetch('/api/upload',{method:'POST',headers:{'x-admin-key':key},body:fd}); const d=await r.json(); if(!r.ok) throw new Error(d.error||'Upload failed'); status.textContent='Ready: '+d.post.media_url; e.currentTarget.reset(); $('#adminKey').value=key; await loadPosts();}catch(err){status.textContent=err.message}finally{btn.disabled=false}});
-loadPosts().catch(()=>{$('#posts').innerHTML='<div class="empty">Data belum bisa dimuat.</div>'});
-</script>
-</body></html>`;
+function xhrUpload(file,key){return new Promise((resolve,reject)=>{const xhr=new XMLHttpRequest();xhr.open('POST','/api/media');xhr.setRequestHeader('x-admin-key',key);xhr.setRequestHeader('x-filename',encodeURIComponent(file.name||'video.mp4'));xhr.setRequestHeader('content-type','video/mp4');xhr.upload.onprogress=e=>{if(!e.lengthComputable)return;const p=Math.max(1,Math.min(99,Math.round((e.loaded/e.total)*100)));$('#uploadBar').style.width=p+'%';$('#uploadPct').textContent=p+'% · '+(e.loaded/1048576).toFixed(1)+' / '+(e.total/1048576).toFixed(1)+' MB';$('#uploadMsg').textContent='Mengirim MP4 ke Cloudflare…';};xhr.onload=()=>{let d={};try{d=JSON.parse(xhr.responseText||'{}')}catch{}if(xhr.status>=200&&xhr.status<300)resolve(d);else reject(new Error(d.error||('Upload gagal (HTTP '+xhr.status+')')))};xhr.onerror=()=>reject(new Error('Koneksi upload terputus.'));xhr.send(file);});}
+$('#uploadForm').addEventListener('submit',async e=>{e.preventDefault();const form=e.currentTarget,btn=$('#uploadBtn'),status=$('#uploadStatus'),box=$('#uploadBox'),msg=$('#uploadMsg'),bar=$('#uploadBar'),pct=$('#uploadPct');const key=$('#adminKey').value.trim();const file=form.querySelector('input[name="file"]').files[0];if(!key){status.textContent='Admin key diperlukan.';return}if(!file){status.textContent='Pilih file MP4 dulu.';return}if(file.size>25*1024*1024){status.textContent='File terlalu besar. Maksimal 25 MiB.';return}localStorage.setItem('waai_admin_key',key);btn.disabled=true;box.classList.add('active');msg.className='uploadmsg';msg.textContent='Memeriksa akses…';bar.style.width='0%';pct.textContent='0%';status.textContent='';try{const auth=await fetch('/api/admin-check',{method:'POST',headers:{'x-admin-key':key}});if(!auth.ok)throw new Error('Admin key salah.');const uploaded=await xhrUpload(file,key);bar.style.width='100%';pct.textContent='100% · upload selesai';msg.textContent='MP4 tersimpan. Menyimpan metadata…';const fields=new FormData(form);const published=fields.get('published_at');const payload={media_id:uploaded.media.id,title:fields.get('title')||'Untitled Reel',caption:fields.get('caption')||'',platform:fields.get('platform')||'Instagram',status:fields.get('status')||'ready',permalink:fields.get('permalink')||'',published_at:published?new Date(published).toISOString():''};const meta=await fetch('/api/posts',{method:'POST',headers:{'x-admin-key':key,'content-type':'application/json'},body:JSON.stringify(payload)});const d=await meta.json();if(!meta.ok)throw new Error(d.error||'Metadata gagal disimpan.');msg.className='uploadmsg ok';msg.innerHTML='✓ Upload berhasil.<br><strong>'+d.post.media_url+'</strong>';status.textContent='Cloudflare ready · '+(file.size/1048576).toFixed(1)+' MB';form.reset();$('#adminKey').value=key;await loadPosts( --- TRUNCATED --- 23,697 chars
